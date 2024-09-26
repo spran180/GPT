@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-with open('pg142.txt', 'r', encoding='utf-8') as f:
+with open('/kaggle/input/textfile/pg142.txt', 'r', encoding='utf-8') as f:
     text = f.read()
 
 chars = sorted(list(set(text)))
@@ -13,31 +13,27 @@ itos = { i:ch for i,ch in enumerate(chars) }
 encode = lambda s: [stoi[c] for c in s]
 decode = lambda l: ''.join([itos[i] for i in l])
 
-st = "what are you doing"
-print(encode(st))
-print(decode(encode(st)))
-
-
 data = torch.tensor(encode(text), dtype=torch.long)
 n = int(0.9*len(data))
 train_data = data[:n]
 val_data = data[n:]
 
 # Hyper- Parameters
-batch_size = 4
-block_size = 8
+batch_size = 64
+block_size = 258
 vocab_size = len(chars)
-n_embd = 32
+n_embd = 384
 dropout = 0.2
 n_head = 6
 n_layer = 6
-print(vocab_size)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def get_batch(split):                                                           #Get Batch
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x, y = x.to(device), y.to(device)
     return x, y
 
 
@@ -93,10 +89,11 @@ class Block(nn.Module):
     super().__init__()
     self.sa_head = MultiHeadAttention(n_head)
     self.ln1 = nn.LayerNorm(n_embd)
+    self.ff = FeedForward(n_embd)  # Move this outside of forward to ensure proper device initialization
 
   def forward(self, x):
     x = x + self.sa_head(self.ln1(x))
-    x = x + FeedForward(n_embd)(self.ln1(x))
+    x = x + self.ff(self.ln1(x))  # Use self.ff instead of creating a new instance each time
     return x
 
 from operator import pos
@@ -105,7 +102,7 @@ class Bigram(nn.Module):
   def __init__(self):
     super().__init__()
     self.embedding_table = nn.Embedding(vocab_size, n_embd)
-    self.position_embedding = nn.Embedding(block_size, n_embd)
+    self.position_embedding = nn.Embedding(block_size, n_embd).to(device)
     self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
     self.ln_f = nn.LayerNorm(n_embd)
     self.lm = nn.Linear(n_embd, vocab_size)
@@ -113,7 +110,7 @@ class Bigram(nn.Module):
   def forward(self, idx, targets=None):
     B, T = idx.shape
     tok_embed = self.embedding_table(idx) # (B, T, C)
-    pos_embed = self.position_embedding(torch.arange(T))
+    pos_embed = self.position_embedding(torch.arange(T, device=device))
     x = tok_embed + pos_embed
     x = self.blocks(x)
     x = self.ln_f(x)
@@ -140,16 +137,20 @@ class Bigram(nn.Module):
     return idx
 
 model = Bigram()
-optimiser = torch.optim.AdamW(model.parameters(), lr=1e-3)
-for i in range(10000):
+model = model.to(device)
+optimiser = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(5000):
   xb, yb = get_batch('train')
+  xb, yb = xb.to(device), yb.to(device)
   logits, loss = model(xb, yb)
+  if i % 500 == 0 or i == 4999:
+        print(f'{i} ----> {loss}')
+  optimiser.zero_grad()
   loss.backward()
   optimiser.step()
-print(f'Final Loss ---> {loss}')
 
+torch.save(model.state_dict(), 'model.pth')
 jst = "what do i say now?"
 idx = encode(st)
-idx = torch.tensor(idx).unsqueeze(0)
+idx = torch.tensor(idx).unsqueeze(0).to(device)
 print(decode(model.generate(idx, max_new_tokens=200)[0].tolist()))
-
